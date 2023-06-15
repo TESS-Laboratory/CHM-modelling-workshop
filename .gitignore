@@ -1,0 +1,11 @@
+.Rproj.user
+.Rhistory
+.Rdata
+.httr-oauth
+.DS_Store
+
+data/
+data_out/
+out_data/
+logo-create/
+additional-no-commit/ 

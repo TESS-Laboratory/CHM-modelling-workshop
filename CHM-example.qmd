@@ -1,0 +1,648 @@
+---
+title: "Modelling Tree Canopy Height using Landsat 8"
+format: 
+  html: 
+   theme: journal
+   embed-resources: true
+bibliography: ["refs.bibtex", "packages.bib"]
+nocite: |
+  @*
+---
+
+## Introduction
+
+This workbook outlines a minimal example, using the R programming language,
+for generating a canopy height model from Earth Observation (EO) data using 
+Machine Learning. This workbook should be reproducible providing that the 
+required packages are installed. 
+
+The workbook will demonstrate how to download training data from a zenodo 
+repository, generate a coincident Landsat 8 annual composite map and apply 
+a short machine learning pipeline done locally in R with no need for cloud 
+compute. However, the scale of the example is relatively small and so larger 
+Areas of Interests (AOI) would benefit from greater computational power.
+
+Let's get into it...
+
+## Project set up
+
+First let's load the libraries we need for the analysis. If you don't have these
+installed, you can run `install.packages(<PACKAGE_NAME>)` to install them. 
+
+```{r}
+#| label: load-lib
+#| message: false
+
+#Data download and wrangling
+library(curl)
+library(dplyr)
+library(tidyr)
+
+#Machine Learning
+library(mlr3verse)
+library(mlr3spatiotempcv)
+library(mlr3mbo)
+library(lightgbm)
+
+#visualisation
+library(ggplot2)
+library(ggpmisc)
+library(tmap)
+library(gt)
+library(scales)
+
+#spatial
+library(terra) 
+library(sf)
+library(rstac)
+library(gdalcubes)
+
+```
+
+Now let's set a random seed number - this is important as we're going to  be 
+using algorithms (actually just one in this example) that depend on random number 
+generation; by setting this value we ensure that the results are reproducible
+
+```{r}
+#| label: set-seed
+set.seed(5446) 
+```
+
+## Training Data 
+Now let's download some Tree Canopy Height (TCH) data generated as part of a biomass
+modelling paper by @asner2018mapped.  We're going to use this as our
+"truth". In reality, this is actually another model, created using Landsat data
+and Aerial LiDAR Survey (ALS) data from 2016.
+Therefore, this example is more like a model emulation rather than estimating 
+actual measured canopy height; but hopefully a useful example - this could be as
+easily replaced with any other TCH data. It is quite a large file so might take
+a little while...
+
+```{r}
+#| label: download-training-data
+
+if (!dir.exists("data")) dir.create("data")
+
+sabah_tch_path <- "data/GAO_TCH_30m_unmasked.tif"
+#https://zenodo.org/record/4549461
+# file is ~ 800MB so takes a little time.
+if (!file.exists(sabah_tch_path)){
+  tch.url <- "https://zenodo.org/record/4549461/files/GAO_TCH_30m_unmasked.tif?download=1"
+  curl::curl_download(tch.url, destfile = sabah_tch_path, quiet=FALSE)
+}
+
+```
+
+
+Let's focus in on a particular area... I've picked this region of Sabah at random
+as it looked like it had a nice diversity of canopy heights and landuse. 
+So  Let's define a centre point of our Area of Interest (AOI) and buffer it by 
+10km - again this is arbitrary - and solely for this example. Then we crop the 
+training TCH data that we downloaded in the last step to be coincident with our AOI.
+
+```{r}
+#| label: set-proj-extent
+proj.area <- sf::st_point(c(479911, 657243))|> #  # sabah example 
+  st_sfc(crs=32650) |> # for sabah 
+  st_buffer(10000, endCapStyle = "SQUARE")
+
+
+tch.proj <- terra::rast(sabah_tch_path) |> 
+  terra::crop(proj.area)
+# tch.proj[is.na(tch.proj)] <- 0
+```
+
+
+It's always a good idea to visualise what you're modelling - let's take a look...
+Here we're plotting the TCH data with the [{tmap}](https://r-tmap.github.io/tmap/) package which uses a Javascript
+library called leaflet (in the background) to create an interactive map. FYI, 
+if you find this type of interactive mapping useful you should also check out the [{mapview}](https://r-spatial.github.io/mapview/) package which does much the same but
+trades of some of the flexibility of tmap for simpler syntax.
+
+```{r}
+#| label: interactive-map
+#| message: false
+
+
+#' Generate a base tmap object to display some basemaps.
+#'
+#' @return A tmap object
+tm_basic <- function() {
+  tmap::tm_basemap(tmap::providers$Esri.WorldImagery) +
+    tmap::tm_basemap(tmap::providers$OpenStreetMap.HOT) +
+    tmap::tm_basemap(tmap::providers$Stamen.Terrain) +
+    tmap::tm_basemap(tmap::providers$CartoDB.DarkMatter)
+}
+
+tmap::tmap_mode("view")
+tm_basic() +
+  tmap::tm_shape(tch.proj, name = "Tree Canopy Height", raster.downsample = TRUE) +
+  tmap::tm_raster(
+    palette ="viridis",
+    style = "cont",
+    title = "Tree Canopy Height"
+  )
+
+```
+
+## Earth Observation Covariate Data
+
+Now, there are many ways to explore and download Earth Observation (EO) data.
+Many of us use [Google Earth Engine (GEE)](https://earthengine.google.com/) as a 
+powerful cloud based platform for data processing. But it can be challenging to 
+work both locally and in GEE (although made much easier in R with the [{rgee}](https://r-spatial.github.io/rgee/)). 
+Further, not all of the processing we need can be achieved in GEE (although many things can
+and there are frequently alternatives). This is as much about showing that there are
+alternative and fully open source options for processing/working with EO data.  
+
+So, introducing Spatio [Temporal Asset Catalogs (STAC)](https://stacspec.org/en). 
+STAC is basically a way that data providers can store/index their geospatial data 
+so that it can be easily searched, filtered and downloaded using a common 
+Application Programming Language (API).
+
+### Landsat Composite
+
+In this next code chunk we search the Microsoft Planetary Computer (MPC) STAC 
+catalog for Landsat 8 imagery in 2016 for our AOI using the [{rstac} package](https://brazil-data-cube.github.io/rstac/). We don't have to use MPC, 
+there are many other catalogs that host the same data but I have found MPC to 
+be very performant.
+
+```{r}
+#| label: stac-search
+
+# Conver our AOI to Lat Long bounding box
+bbox <- st_bbox(tch.proj) 
+bbox_wgs84 <- bbox |>
+  st_as_sfc(crs=32650) |> 
+  st_transform("EPSG:4326") |>
+  st_bbox()
+
+# submit get request to STAC endpoint
+s = stac("https://planetarycomputer.microsoft.com/api/stac/v1/")
+col.list <- rstac::collections(s) |> 
+  get_request()
+
+
+# post the request with initial filtering parameters
+items = s |>
+  stac_search(collections = "landsat-c2-l2",
+              bbox = c(bbox_wgs84["xmin"],bbox_wgs84["ymin"],
+                       bbox_wgs84["xmax"],bbox_wgs84["ymax"]), 
+              datetime ="2016-01-01T00:00:00Z/2016-12-30T00:00:00Z" )|>
+  post_request()|> items_sign(sign_fn = sign_planetary_computer())
+
+
+length(items$features) # How many images do we have
+```
+Note how there are `r length(items$features)` images returned in the initial 
+search; This includes different sensors with varying cloud coverages. Let's 
+refine this firstly by stating the assests (bands) we want to download, 
+specify the sensor we want (Landsat 8) and finally the percent of cloud cover 
+we will accept as a maximum. 
+
+
+```{r}
+#| label: stac-search-filter
+#| warning: false
+l8_collection = stac_image_collection(
+  items$features,
+  asset_names = c(
+    "qa_pixel",
+    "coastal" ,
+    "blue" ,
+    "green",
+    "red" ,
+    "nir08",
+    "swir16",
+    "swir22"
+  )    ,
+  property_filter = function(x) {
+    # 
+     x[["eo:cloud_cover"]] < 20 & x[["platform"]]=="landsat-8"
+    #
+    #
+  }
+)
+l8_collection
+```
+Now we have reduced our cube to just `r nrow(gdalcubes:::gc_image_collection_info(l8_collection)$images)` 
+images, it's time to create a composite. Here we use the {gdalcubes} package to 
+create this, first we define the structure of the cube, i.e. the spatio temporal 
+dimensions, coordinate reference system (CRS), temporal reduction method (here 
+we use median) and the spatial resampling method.
+
+
+```{r}
+#| label: define-data-cube
+e <- extent(l8_collection)
+
+gdalcubes_options(parallel = parallel::detectCores()-4)
+v = cube_view(srs=paste0("EPSG:",st_crs(proj.area)$epsg), dx=30, dy=30, dt="P1Y", 
+              aggregation="median", resampling = "bilinear",
+              extent=
+                list(t0 = e$t0, t1 = e$t1,
+                          left=bbox["xmin"], right=bbox["xmax"],
+                          top=bbox["ymax"], bottom=bbox["ymin"])
+              )
+v
+
+
+```
+
+
+Now let's download the data and apply cloud masking and some pixel maths in the 
+process to generate a annual composite for 2016. 
+
+```{r}
+#| label: download-EO-data
+
+# L8.clear_mask = image_mask("qa_pixel", bits=1:4, values=16)
+L8.clear_mask = image_mask("qa_pixel", values=21824, invert=TRUE)
+cube <- raster_cube(l8_collection, v, mask = L8.clear_mask) |> 
+  apply_pixel(c("(nir08-red)/(nir08+red)"), names="NDVI", keep_bands=TRUE) 
+
+if(!dir.exists("out_data")) dir.create("out_data")
+
+terra_cube <-
+  write_tif(cube, dir = "data_out", prefix = "Sabah_example_") |>  #
+  rast()
+
+# Rescale the imagery but not NDVI that one is fine.
+terra_cube[[setdiff(names(terra_cube), c("NDVI", "qa_pixel"))]] <- 
+  terra_cube[[setdiff(names(terra_cube), c("NDVI", "qa_pixel"))]]/10000 
+
+
+```
+
+
+What did we just download? Let's take a look... You'll see that to generate to 
+RGB image in R, a little extra work is needed to get a visually recognisable 
+image. You can use `terra::plotRGB` but the colours might look a bit "off". 
+`tmap::tm_rgb` can also be used but ggplot does off a lot of control so it is 
+useful to know.
+
+```{r}
+#| label: ggplot-rgb
+
+#' Convert an RGB raster to a dataframe ready to plot with ggplot.
+#'
+#' @param r SpatRaster object that contains bands named red, green and blue.
+#' @param .min Numeric between 0 and 1. The minimum cutoff value to visualise.
+#' @param .max Numeric between 0 and 1. The maximum cutoff value to visualise.
+#' @param .yr Adds a labelling column - in this case the year.
+#'
+#' @return A dataframe representing the values of the rgb raster with x and y locations.
+l8_to_rgb_df <- function(r, .min=0.001, .max=1.2, .yr=2016){
+  as.data.frame(r, xy=TRUE) |>
+    mutate(red = case_when(red<.min ~ .min,
+                          red>.max ~ .max,
+                          TRUE ~ red),
+           red =scales::rescale(red, c(0,1)),
+           green = case_when(green<.min ~ .min,
+                          green>.max ~ .max,
+                          TRUE ~ green),
+           green = scales::rescale(green, c(0,1)),
+           blue = case_when(blue<.min ~ .min,
+                          blue>.max ~ .max,
+                          TRUE ~ blue),
+           blue = scales::rescale(blue, c(0,1)),
+           Year = .yr)
+
+}
+
+#' create an RGB raster map with {ggplot2}
+#'
+#' @param .x SpatRaster object that contains bands named red, green and blue.
+#'
+#' @return A ggplot
+rgb_plot <- function(.x){
+  
+  l8_df <- l8_to_rgb_df(.x[[c("red", "green", "blue")]]) |>  # run the function to get a dataframe
+    tidyr::drop_na()
+            
+  ggplot(data=l8_df, aes(x=x, y=y, fill=rgb(red,green,blue))) +
+  geom_raster() +
+  scale_fill_identity() +
+theme_light() +
+  scale_x_continuous(breaks = round(seq(min(l8_df$x), max(l8_df$x), by = 5e+3),0)) +
+  scale_y_continuous(breaks = round(seq(min(l8_df$y), max(l8_df$y), by = 5e+3),0))+
+  theme(
+    axis.title.x=element_blank(),
+    axis.title.y=element_blank()) +
+  coord_fixed()
+}
+
+rgb_plot(terra_cube)
+
+```
+
+### Terrain Data
+
+In addition to the spectral data from our Landsat 8 composite, we might also 
+want to include other environmental covariates which could have some relationship
+with tree canopy height. So, let's add some terrain data and related geomorphometrics.
+We again use `rstac` to retrieve the DTM tiles. Here we don't need to use `gdalcubes`
+because the global DTM is assumed to represent a snapshot in time and therefore we
+do not have overlapping tiles. Here, `terra` (which uses [gdal](https://gdal.org/)
+for reading data) is very capable of reading on-line GeoTiff from urls.
+
+
+```{r}
+#| label: get-terrain-data
+
+#' Get the URLs for DTM tiles.
+#'
+#' @param aoi_box A bbox object (using EPDG:4326 CRS)
+#' @param collection default "cop-dem-glo-30". The DTM collection to request.
+#'
+#' @return A list of DTM tile urls from the Microsoft Planetary Computer STAC catalog.
+mpc_dtm_src <- function(aoi_box,
+                        collection = "cop-dem-glo-30"){
+  
+  s_obj <- rstac::stac("https://planetarycomputer.microsoft.com/api/stac/v1")
+  rstac::get_request(s_obj)
+  
+  it_obj <- s_obj  |>
+    rstac::stac_search(collections = collection[1],
+                       bbox = c(aoi_box["xmin"],aoi_box["ymin"],
+                                aoi_box["xmax"],aoi_box["ymax"]))  |>
+    rstac::get_request()
+  
+  src_list <-rstac::assets_url(it_obj)
+  
+  .urls <- src_list[grep(".tif$", src_list)]
+  
+  sapply(.urls, function(x) paste0("/vsicurl/", x), USE.NAMES =FALSE)
+  
+}
+
+tch.reproj <- project(tch.proj, terra_cube)
+
+dtm <- mpc_dtm_src(bbox_wgs84) |> # call the function to get the tile urls
+  lapply(rast) |> # iterate over the tiles and load as a spatRaster object
+  terra::sprc() |> # convert to a collection
+  terra::merge() |> # merge the tiles - basic mosaic - nothing overlaps here so this is fine.
+  project(tch.reproj) # project into our desired CRS and extent etc.
+names(dtm) <- "dtm"
+# now generate a few geomorphometric layers
+asp <- terra::terrain(dtm, "aspect")
+slp <- terrain(dtm, "slope")
+TRI <- terrain(dtm, "TRIrmsd")
+rough <- terrain(dtm, "roughness")
+```
+
+## Building The Model Inputs
+
+Now, let's combine the Terrain and Landsat 8 composite data into a single raster with all 
+of the bands. Then we convert this to a dataframe so that we can apply the 
+statistical models as we need.
+
+```{r}
+#| label: build-cube
+
+# combine all of our layers from L8 and the terrain.
+tch.reproj <- project(tch.proj, terra_cube)
+
+comb_dat <- c(tch.reproj,terra_cube, dtm, asp, slp, TRI, rough) 
+drop_bands <- c("qa_pixel") # we don't want to model with pixel masks so drop it. Also dropping lwir11 as there are a lot of missing values and not useful for our needs.
+comb_dat <- comb_dat[[setdiff(names(comb_dat), drop_bands)]]
+names(comb_dat[[1]]) <- "TCH"
+# this will be our dataframe for the ML section
+comb_df <- as.data.frame(comb_dat, xy=TRUE) |> 
+  tidyr::drop_na()
+
+
+
+
+```
+
+
+Before we start modelling, what did we just download? Let's take a look...Here 
+are the individual bands, plotted using `ggplot2` and `patchwork`. Again,
+a simple `plot(comb_dat)` but does not correctly display data ranges due to the
+differences across bands.
+
+```{r}
+# plotting data in ggplot requires longform data.
+comb_df |> 
+  tidyr::pivot_longer(-one_of(c("x", "y"))) |> # converts df to longform.
+  dplyr::group_by(name) |> # groups by band
+  dplyr::group_map(~ggplot(.x) + # applies plot function by band
+  aes(x=x, y=y, fill=value)+
+  geom_raster() +
+    guides(fill="none") +
+  scale_fill_viridis_c() +
+    coord_fixed()+
+    theme_void() +
+    labs(subtitle=.x$name[1]) +
+  theme(
+    axis.title.x=element_blank(),
+    axis.title.y=element_blank(),
+    axis.text.x=element_blank(),
+    axis.text.y=element_blank()),
+  .keep=TRUE) |> 
+    patchwork::wrap_plots(nrow=3) # combines all plots into a grid
+
+```
+## Machine Learning with {mlr3}
+
+Now Let's do some statistics/machine learning - so much jargon in this space!
+we're going to use the [{mlr3}](https://mlr3.mlr-org.com/) ecosystem to simplify 
+our workflow - it has lots of functionality for applying different ML techniques 
+and algorithms. This example is very basic but check out the [mlr3 book](https://mlr3book.mlr-org.com/)
+for loads of great infotmation. You may also want to consider the [tidymodels](https://www.tidymodels.org/)
+ecosystem which has very similar functionality to mlr3 but is stylistically 
+very different. 
+
+The first step with `mlr3` is to define the `task` this is essentially a template/
+instruction set for the other mlr3 functions to work with. 
+
+```{r}
+#  ---------- GENERATE A "TASK" ------------
+task = mlr3spatiotempcv::TaskRegrST$new(
+  id = "Sabah_CHM",
+  backend = comb_df, 
+  target = "TCH", 
+  coordinate_names = c("x", "y"),
+  extra_args = list(
+    coords_as_features = FALSE,
+    crs = terra::crs(comb_dat))
+)
+```
+
+You'll note that this task is a little bit special because we use the [mlr3spatiotempcv package](https://mlr3spatiotempcv.mlr-org.com/articles/mlr3spatiotempcv.html);
+essentially this just manages the additional spatial/temporal attributes of our data: 
+coordinates, CRS and time (if we are doing multi temporal work which we aren't here)
+to manage resmapling strategies.
+
+So, let's define the spatial resampling method that we will use to evaluate 
+our model's performance. We can also use this for model tuning (although this
+is not included in this example). Note how training and test data partitions 
+are spatially distinct. There are many different ways to do this spatial partitioning
+but this method is simple and often more than suitable. It uses kmeans 
+clustering to split the AOI into 6 regions (based on the requested 
+number of folds). It is important to do this to avoid over estimating our model's
+performance by evaluating predictions with neighbouring or nearby cells which
+are more likely to be similar due to their spatial location. 
+
+```{r}
+
+# ---------- DEFINTE A RESAMPLING PLAN ------------
+spcv_plan <- mlr3::rsmp("repeated_spcv_coords", folds = 6, repeats=1)
+
+autoplot(spcv_plan, task = task, fold_id=1:3)
+
+```
+
+Now we set some "learners" aka algorithms - let's test two in this case LightGBM
+and a Generalised Linear Model (GLM). 
+
+```{r}
+# ------- DEFINE SOME LEARNERS
+lgbm.lrn <- mlr3::lrn("regr.lightgbm")
+lrn.glm <- mlr3::lrn("regr.glm")
+```
+
+
+Let's benchmark these learners and see which will perform better:
+
+```{r}
+design = benchmark_grid(task, list(lgbm.lrn, lrn.glm), spcv_plan)
+# print(design)
+future::plan("multisession", workers = 6) # sets the number of cores to run on -  we have
+bmr = mlr3::benchmark(design)
+aggr = bmr$aggregate(measures = c(msr("regr.rmse"), msr("regr.mse"), msr("regr.rsq")))
+
+
+gt::gt(aggr[,4:9,])
+
+```
+
+So the Lightgbm model looks to be the best - we could very well get a better performance out of
+all these models with some tuning and feature selection but, for now, let's keep
+it simple. The result from the LightGBM also looks pretty good.
+
+So, let's check this in more detail by running the resampling and inspecting the results
+by plotting the predicted sets from the resampling:
+
+
+```{r}
+resample_lgbm <- progressr::with_progress(expr = {
+  mlr3::resample(
+    task = task,
+    learner = lgbm.lrn, 
+    resampling = spcv_plan,
+    store_models = FALSE,
+    encapsulate = "evaluate"
+  )
+})
+
+resample_lgbm$aggregate(measure = c(
+    mlr3::msr("regr.bias"),
+    mlr3::msr("regr.rmse"),
+    mlr3::msr("regr.mse")))
+
+resample_lgbm$prediction() |> 
+  ggplot() +
+  aes(x=response, y=truth)+
+  geom_bin_2d(binwidth = 0.3) +
+  scale_fill_viridis_c(trans=scales::yj_trans(0.1), option="G", direction=-1) +
+  geom_abline(slope=1) +
+  theme_light()
+
+```
+
+Great, so we have our chosen model, let's predict across our full cube using all available
+data - we've done our accuracy evaluation so it makes no sense to have any data held out
+for the final model. Now, remember that the Tree canopy height data we are emulating is a model itself,
+also, we are not totally sure what imagery was used to generate it. So, given this,
+take a look at the differences between the original TCH model and our LightGBM model results and 
+consider why there are some fairly curious differences...
+
+```{r}
+#---------- TRAIN THE MODEL -----------
+lgbm.lrn$train(task)
+
+
+#----------- PREDICT THE FULL MODEL --------
+p <- terra::predict(comb_dat, lgbm.lrn, na.rm=FALSE)
+
+
+#----------- Let's compare with the training data --------
+
+l8rgb <- terra_cube[[c(7, 3, 1)]]
+
+l8rgb.mat <- as.matrix(l8rgb) |>
+  scales::rescale()
+values(l8rgb) <- l8rgb.mat
+tm_basic() +
+  tm_shape(l8rgb, name="L8-rgb", raster.downsample = FALSE) +
+  tm_rgb(r= 1, g=2, b=3, max.value = 1)+
+  tmap::tm_shape(tch.reproj, name = "Tree Canopy Height", raster.downsample = TRUE) +
+  tmap::tm_raster(
+    palette ="viridis",
+    style = "cont",
+    title = "Tree Canopy Height",
+    breaks=c(seq(0, 50, 10))
+  ) +
+  tmap::tm_shape(p, name = "Modelled Tree Canopy Height", raster.downsample = FALSE) +
+  tmap::tm_raster(
+    palette ="viridis",
+    style = "cont",
+    title = "Modelled Tree Canopy Height",
+    breaks=c(seq(0, 50, 10))
+  )
+```
+
+
+## Summary
+
+- We have downloaded some training data to use as an input to train
+our own machine learning model. 
+
+- Then we downloaded Landsat 8 data and created a cloud masked annual median composite for 
+2016. 
+
+- Next, we downloaded a dtm (Copernicus 30 m) and derived a range of geomorphometric 
+covariates. 
+
+- We combined all of these bands of data into a single raster,  and then
+created a data frame comprising all of these values (along with our training TCH data).
+
+- Then, we tested two ML models using their default values, benchmarked their
+predictive performance and, based on this benchmark, selected the LightGBM model
+as having better performance.
+
+- We generated resampled predictions using spatially distinct test/train sets and 
+visualised these results alongside generating aggregated model evaluation metrics.
+
+- Finally, we trained the model and predicted these values across our data cube to 
+create our own TCH model. In prinicple we could now apply this model into new years
+and new regions, taking care to ensure that the new regions are reasonably described by
+the environmental covariates in this training process.
+
+
+## Further considerations
+
+We have done no model tuning or feature selection. Both of these things can be
+carried out in mlr3 and are very likely to yield significant model improvements
+but will take a little longer to run. 
+
+Other ML algorithms may also yield good or even better results than presented
+here However, LightGBM is very fast and does often generate good results for these
+sorts ML projects. 
+
+We haven't applied our model into novel regions or time periods - if we chose to
+do this, there are some important things to consider such as ["area of applicability"](https://hannameyer.github.io/CAST/articles/cast02-AOA-tutorial.html#:~:text=The%20AOA%20is%20defined%20as,estimated%20cross%2Dvalidation%20performance%20holds.) and 
+spectral consistency across annual composites. we also haven't included any 
+data that might more directly describe vegetations structure in this example,
+data such as [Synthetic Aperture Radar (SAR)](https://www.earthdata.nasa.gov/learn/backgrounders/what-is-sar) 
+might help to improve model performance but SAR comes with many unique challenges. 
+
+
+
+
+
+
+
+
