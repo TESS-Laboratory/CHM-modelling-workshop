@@ -16,14 +16,31 @@ Check out the rendered notebook here:
 https://tess-laboratory.github.io/CHM-modelling-workshop/
 
 
-## Install/Run locally
+## Install
 If you want to run this notebook on your own machine, you can either install all
 of the loaded packages on your main R environment or simply restore the R 
-environment using the {renv} package like so: 
+environment using the {renv} package.
 
+Run this in the R console:
 ```
 # install.packages("renv")
 renv::restore() 
 
 ```
+
+## Build the notebook
+The notebook is created using [quarto](https://quarto.org/) I highly recommend
+checking this out; it's basically a modern alternative to Rmarkdown and Jupyter 
+notebooks. You will need to [install quarto](https://quarto.org/docs/get-started/) 
+on your system before you can build the notebook.
+
+Then in the terminal run: 
+```
+quarto render CHM-example.qmd -o index.html
+
+```
+Or, if you're feeling fancy and are using Rstudio, open the *Build* tab, select
+*Configure Build Tools*, then, in the *Project build tools* drop down menu, select
+*Makefile* and hit *ctrl+shift+b*.
+
 
