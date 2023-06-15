@@ -123,7 +123,6 @@ trades of some of the flexibility of tmap for simpler syntax.
 #| label: interactive-map
 #| message: false
 
-
 #' Generate a base tmap object to display some basemaps.
 #'
 #' @return A tmap object
@@ -236,7 +235,7 @@ we use median) and the spatial resampling method.
 #| label: define-data-cube
 e <- extent(l8_collection)
 
-gdalcubes_options(parallel = parallel::detectCores()-4)
+gdalcubes_options(parallel = parallel::detectCores()-4) # set the number of cores to use.
 v = cube_view(srs=paste0("EPSG:",st_crs(proj.area)$epsg), dx=30, dy=30, dt="P1Y", 
               aggregation="median", resampling = "bilinear",
               extent=
@@ -251,7 +250,8 @@ v
 
 
 Now let's download the data and apply cloud masking and some pixel maths in the 
-process to generate a annual composite for 2016. 
+process to generate a annual composite for 2016 with an additional band showing
+the Normalised Difference Vegetation Index (NDVI). 
 
 ```{r}
 #| label: download-EO-data
@@ -344,7 +344,7 @@ with tree canopy height. So, let's add some terrain data and related geomorphome
 We again use `rstac` to retrieve the DTM tiles. Here we don't need to use `gdalcubes`
 because the global DTM is assumed to represent a snapshot in time and therefore we
 do not have overlapping tiles. Here, `terra` (which uses [gdal](https://gdal.org/)
-for reading data) is very capable of reading on-line GeoTiff from urls.
+for reading data) is very capable of reading on-line GeoTiff files from urls.
 
 
 ```{r}
@@ -419,8 +419,8 @@ comb_df <- as.data.frame(comb_dat, xy=TRUE) |>
 
 Before we start modelling, what did we just download? Let's take a look...Here 
 are the individual bands, plotted using `ggplot2` and `patchwork`. Again,
-a simple `plot(comb_dat)` but does not correctly display data ranges due to the
-differences across bands.
+a simple `plot(comb_dat)`will work just fine but does not correctly display the data 
+due to the differences in ranges across bands.
 
 ```{r}
 # plotting data in ggplot requires longform data.
@@ -554,12 +554,11 @@ resample_lgbm$prediction() |>
 
 Great, so we have our chosen model, let's predict across our full cube using all available
 data - we've done our accuracy evaluation so it makes no sense to have any data held out
-for the final model. Now, remember that the Tree canopy height data we are emulating is a model itself,
-also, we are not totally sure what imagery was used to generate it. So, given this,
-take a look at the differences between the original TCH model and our LightGBM model results and 
-consider why there are some fairly curious differences...
+for the final model. Training and predicting the model is just two lines of code:
 
 ```{r}
+#| label: train-and-predict
+
 #---------- TRAIN THE MODEL -----------
 lgbm.lrn$train(task)
 
@@ -567,10 +566,19 @@ lgbm.lrn$train(task)
 #----------- PREDICT THE FULL MODEL --------
 p <- terra::predict(comb_dat, lgbm.lrn, na.rm=FALSE)
 
+```
 
+Now, remember that the Tree canopy height data we are emulating is a model itself,
+also, we are not totally sure what imagery was used to generate it. So, given this,
+take a look at the differences between the original TCH model and our LightGBM model results and 
+consider why there are some fairly curious differences...
+
+```{r}
+#| label: plot-and-compare-model
+#| warning: false
 #----------- Let's compare with the training data --------
 
-l8rgb <- terra_cube[[c(7, 3, 1)]]
+l8rgb <- terra_cube[[c("red", "green", "blue")]]
 
 l8rgb.mat <- as.matrix(l8rgb) |>
   scales::rescale()
@@ -600,8 +608,8 @@ tm_basic() +
 - We have downloaded some training data to use as an input to train
 our own machine learning model. 
 
-- Then we downloaded Landsat 8 data and created a cloud masked annual median composite for 
-2016. 
+- Then we downloaded Landsat 8 data and created a cloud masked annual median 
+composite for 2016. 
 
 - Next, we downloaded a dtm (Copernicus 30 m) and derived a range of geomorphometric 
 covariates. 
