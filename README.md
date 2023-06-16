@@ -2,7 +2,7 @@
 # CHM-modelling-workshop
 
 <!-- badges: start -->
-[tess-badge]("inst/tess-lab-teaching-resources.svg")
+![tess-badge]("inst/tess-lab-teaching-resources.svg")
 <!-- badges: end -->
 
 An introductory notebook describing how to carry out a regression machine 
