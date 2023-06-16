@@ -41,11 +41,13 @@ library(tidyr)
 #Machine Learning
 library(mlr3verse)
 library(mlr3spatiotempcv)
+library(mlr3extralearners)
 library(mlr3mbo)
 library(lightgbm)
 
 #visualisation
 library(ggplot2)
+library(ggtext)
 library(ggpmisc)
 library(tmap)
 library(gt)
