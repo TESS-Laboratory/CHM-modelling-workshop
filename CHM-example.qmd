@@ -8,6 +8,7 @@ bibliography: ["refs.bibtex", "packages.bib"]
 nocite: |
   @*
 ---
+#### (By Hugh Graham)
 
 ## Introduction
 
@@ -16,11 +17,11 @@ for generating a canopy height model from Earth Observation (EO) data using
 Machine Learning. This workbook should be reproducible providing that the 
 required packages are installed. 
 
-The workbook will demonstrate how to download training data from a zenodo 
+The workbook will demonstrate how to download training data from a Zenodo 
 repository, generate a coincident Landsat 8 annual composite map and apply 
 a short machine learning pipeline done locally in R with no need for cloud 
 compute. However, the scale of the example is relatively small and so larger 
-Areas of Interests (AOI) would benefit from greater computational power.
+Areas of Interest (AOI) would benefit from greater computational power.
 
 Let's get into it...
 
@@ -156,7 +157,7 @@ Further, not all of the processing we need can be achieved in GEE (although many
 and there are frequently alternatives). This is as much about showing that there are
 alternative and fully open source options for processing/working with EO data.  
 
-So, introducing Spatio [Temporal Asset Catalogs (STAC)](https://stacspec.org/en). 
+So, introducing [Spatio Temporal Asset Catalogs (STAC)](https://stacspec.org/en). 
 STAC is basically a way that data providers can store/index their geospatial data 
 so that it can be easily searched, filtered and downloaded using a common 
 Application Programming Language (API).
@@ -252,7 +253,7 @@ v
 
 
 Now let's download the data and apply cloud masking and some pixel maths in the 
-process to generate a annual composite for 2016 with an additional band showing
+process to generate an annual composite for 2016 with an additional band showing
 the Normalised Difference Vegetation Index (NDVI). 
 
 ```{r}
@@ -280,7 +281,7 @@ terra_cube[[setdiff(names(terra_cube), c("NDVI", "qa_pixel"))]] <-
 What did we just download? Let's take a look... You'll see that to generate to 
 RGB image in R, a little extra work is needed to get a visually recognisable 
 image. You can use `terra::plotRGB` but the colours might look a bit "off". 
-`tmap::tm_rgb` can also be used but ggplot does off a lot of control so it is 
+`tmap::tm_rgb` can also be used but ggplot does offer a lot of control so it is 
 useful to know.
 
 ```{r}
@@ -421,7 +422,7 @@ comb_df <- as.data.frame(comb_dat, xy=TRUE) |>
 
 Before we start modelling, what did we just download? Let's take a look...Here 
 are the individual bands, plotted using `ggplot2` and `patchwork`. Again,
-a simple `plot(comb_dat)`will work just fine but does not correctly display the data 
+a simple `plot(comb_dat)`will work OK but does not correctly display the data 
 due to the differences in ranges across bands.
 
 ```{r}
@@ -448,7 +449,7 @@ comb_df |>
 ```
 ## Machine Learning with {mlr3}
 
-Now Let's do some statistics/machine learning - so much jargon in this space!
+Now let's do some statistics/machine learning - so much jargon in this space!
 we're going to use the [{mlr3}](https://mlr3.mlr-org.com/) ecosystem to simplify 
 our workflow - it has lots of functionality for applying different ML techniques 
 and algorithms. This example is very basic but check out the [mlr3 book](https://mlr3book.mlr-org.com/)
@@ -474,15 +475,15 @@ task = mlr3spatiotempcv::TaskRegrST$new(
 
 You'll note that this task is a little bit special because we use the [mlr3spatiotempcv package](https://mlr3spatiotempcv.mlr-org.com/articles/mlr3spatiotempcv.html);
 essentially this just manages the additional spatial/temporal attributes of our data: 
-coordinates, CRS and time (if we are doing multi temporal work which we aren't here)
-to manage resmapling strategies.
+coordinates, CRS and time (if we were doing multi-temporal work which we aren't here)
+to manage resamapling strategies.
 
 So, let's define the spatial resampling method that we will use to evaluate 
 our model's performance. We can also use this for model tuning (although this
 is not included in this example). Note how training and test data partitions 
 are spatially distinct. There are many different ways to do this spatial partitioning
 but this method is simple and often more than suitable. It uses kmeans 
-clustering to split the AOI into 6 regions (based on the requested 
+clustering to split the AOI into six regions (based on the requested 
 number of folds). It is important to do this to avoid over estimating our model's
 performance by evaluating predictions with neighbouring or nearby cells which
 are more likely to be similar due to their spatial location. 
@@ -496,7 +497,7 @@ autoplot(spcv_plan, task = task, fold_id=1:3)
 
 ```
 
-Now we set some "learners" aka algorithms - let's test two in this case LightGBM
+Now we set some "learners" (AKA algorithms) - let's test two in this case LightGBM
 and a Generalised Linear Model (GLM). 
 
 ```{r}
