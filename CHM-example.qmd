@@ -43,7 +43,6 @@ library(tidyr)
 library(mlr3verse)
 library(mlr3spatiotempcv)
 library(mlr3extralearners)
-library(mlr3mbo)
 library(lightgbm)
 
 #visualisation
@@ -112,7 +111,6 @@ proj.area <- sf::st_point(c(479911, 657243))|> #  # sabah example
 
 tch.proj <- terra::rast(sabah_tch_path) |> 
   terra::crop(proj.area)
-# tch.proj[is.na(tch.proj)] <- 0
 ```
 
 
@@ -219,10 +217,7 @@ l8_collection = stac_image_collection(
     "swir22"
   )    ,
   property_filter = function(x) {
-    # 
      x[["eo:cloud_cover"]] < 20 & x[["platform"]]=="landsat-8"
-    #
-    #
   }
 )
 l8_collection
@@ -426,6 +421,7 @@ a simple `plot(comb_dat)`will work OK but does not correctly display the data
 due to the differences in ranges across bands.
 
 ```{r}
+#| label: plot-bands
 # plotting data in ggplot requires longform data.
 comb_df |> 
   tidyr::pivot_longer(-one_of(c("x", "y"))) |> # converts df to longform.
@@ -461,6 +457,7 @@ The first step with `mlr3` is to define the `task` this is essentially a templat
 instruction set for the other mlr3 functions to work with. 
 
 ```{r}
+#| label: mlr3-task
 #  ---------- GENERATE A "TASK" ------------
 task = mlr3spatiotempcv::TaskRegrST$new(
   id = "Sabah_CHM",
@@ -489,6 +486,7 @@ performance by evaluating predictions with neighbouring or nearby cells which
 are more likely to be similar due to their spatial location. 
 
 ```{r}
+#| label: mlr3-resample
 
 # ---------- DEFINTE A RESAMPLING PLAN ------------
 spcv_plan <- mlr3::rsmp("repeated_spcv_coords", folds = 6, repeats=1)
@@ -501,6 +499,7 @@ Now we set some "learners" (AKA algorithms) - let's test two in this case LightG
 and a Generalised Linear Model (GLM). 
 
 ```{r}
+#| label: mlr3-leaners
 # ------- DEFINE SOME LEARNERS
 lgbm.lrn <- mlr3::lrn("regr.lightgbm")
 lrn.glm <- mlr3::lrn("regr.glm")
@@ -510,6 +509,7 @@ lrn.glm <- mlr3::lrn("regr.glm")
 Let's benchmark these learners and see which will perform better:
 
 ```{r}
+#| label: mlr3-benchmark
 design = benchmark_grid(task, list(lgbm.lrn, lrn.glm), spcv_plan)
 # print(design)
 future::plan("multisession", workers = 6) # sets the number of cores to run on -  we have
@@ -530,6 +530,7 @@ by plotting the predicted sets from the resampling:
 
 
 ```{r}
+#| label: mlr3-evaluate
 resample_lgbm <- progressr::with_progress(expr = {
   mlr3::resample(
     task = task,
@@ -560,7 +561,7 @@ data - we've done our accuracy evaluation so it makes no sense to have any data 
 for the final model. Training and predicting the model is just two lines of code:
 
 ```{r}
-#| label: train-and-predict
+#| label: mlr3-train-and-predict
 
 #---------- TRAIN THE MODEL -----------
 lgbm.lrn$train(task)
