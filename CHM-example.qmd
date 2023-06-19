@@ -4,11 +4,13 @@ format:
   html: 
    theme: journal
    embed-resources: true
+author: Hugh Graham
+date: today
+title-block-banner: true
 bibliography: ["refs.bibtex", "packages.bib"]
 nocite: |
   @*
 ---
-#### (By Hugh Graham)
 
 ## Introduction
 
